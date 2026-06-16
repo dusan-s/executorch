@@ -516,7 +516,7 @@ __host__ __device__
     __assert_fail(
         const char* assertion,
         const char* file,
-        unsigned int line,
+        int line,           // <--- CHANGE THIS FROM unsigned int TO int
         const char* function) noexcept __attribute__((__noreturn__));
 
 #endif // __SYCL_DEVICE_ONLY__
