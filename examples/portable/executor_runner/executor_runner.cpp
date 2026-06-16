@@ -241,6 +241,7 @@ std::vector<uint8_t> try_load_file(const std::filesystem::path& path) {
 
 int main(int argc, char** argv) {
   executorch::runtime::runtime_init();
+  printf("--- ExecuTorch Start ---\n");
 
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   if (argc != 1) {
@@ -777,7 +778,8 @@ int main(int argc, char** argv) {
     }
   } else if (print_output_mode == PrintOutputMode::Summary) {
     // Print the first and last 100 elements of long lists of scalars.
-    std::cout << executorch::extension::evalue_edge_items(100);
+    //std::cout << executorch::extension::evalue_edge_items(100);
+    std::cout << executorch::extension::evalue_edge_items(500);
 
     for (int i = 0; i < outputs.size(); ++i) {
       std::cout << "OutputX " << i << ": " << outputs[i] << std::endl;
