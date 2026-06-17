@@ -38,6 +38,17 @@ namespace {
  * in_C_per_group x in_H x in_W, to compute an out channel of size 1 x out_H x
  * out_W.
  */
+ 
+ /**
+ * Computes 2D convolution out results for a given group and channel.
+ * The forward (non-transposed) path is vectorized using RVV intrinsics, 
+ * for each kernel position (in_c, w_y, w_x), a safe output column range
+ * is computed so that the corresponding input column stays within bounds,
+ * then that range is processed in chunks using strided load (vlse32),
+ * fused multiply-accumulate (vfmacc), and store (vse32). Bias is added
+ * in a final vectorized pass over output row. The transposed
+ * convolution path remains scalar, unchanged from the original.
+ */
 template <typename CTYPE, typename LoadFn = CTYPE (*)(const void*)>
 void conv2d_impl(
     const CTYPE* const in_ptr,
@@ -92,103 +103,36 @@ void conv2d_impl(
   const int64_t dilation_x = val_at(dilation, 1);
 
   if (!transposed) {
-  /*
-	//printf("Not transposed.\n");
-    w_coord[0] = out_c;
-    // Compute 2D output region
-    for (const auto out_y : c10::irange(out_H)) {
-      out_coord[2] = out_y;
-      for (const auto out_x : c10::irange(out_W)) {
-        out_coord[3] = out_x;
-
-        CTYPE accum = 0.0f;
-        for (const auto in_c :
-             c10::irange(in_c_start, in_c_start + in_C_per_group)) {
-          in_coord[1] = in_c;
-          w_coord[1] = in_c - in_c_start;
-
-          for (const auto w_y : c10::irange(w_H)) {
-            w_coord[2] = w_y;
-
-            ssize_t in_y = stride_y * out_y + dilation_y * w_y - padding_y;
-            in_coord[2] = in_y;
-            // Only proceed if input y coordinate is within bounds
-            if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
-              for (const auto w_x : c10::irange(w_W)) {
-                w_coord[3] = w_x;
-
-                ssize_t in_x = stride_x * out_x + dilation_x * w_x - padding_x;
-                in_coord[3] = in_x;
-
-                // Only proceed if input x coordinate is within bounds
-                if (in_x >= 0 && in_x < static_cast<ssize_t>(in_W)) {
-                  size_t in_idx =
-                      calculate_linear_index(in_coord, in_strides.data(), 4);
-                  CTYPE in_val = in_ptr[in_idx];
-
-                  size_t w_idx =
-                      calculate_linear_index(w_coord, w_strides.data(), 4);
-                  CTYPE w_val = w_ptr[w_idx];
-
-                  accum += in_val * w_val;
-                }
-              }
-            }
-          }
-        }
-
-        if (bias_ptr != nullptr) {
-          accum += load_bias(&bias_ptr[out_c * bias.value().element_size()]);
-        }
-        size_t out_idx =
-            calculate_linear_index(out_coord, out_strides.data(), 4);
-        out_ptr[out_idx] = accum;
-      }
-    }
-    */
     float bias_val = 0.0f;
     if (bias_ptr != nullptr){
       bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
     }
+    float* p_out_channel = (float*)out_ptr + batch * out_strides[0] + out_c * out_strides[1];
 
-    //hocu da izvucem jedan kanal/sloj, pd a aiteriram kroz njega tako sto scu iterirati kroz vrtse u tom jednom sloju
-    float* p_out_kanal = (float*)out_ptr + batch * out_strides[0] + out_c * out_strides[1]; //na osnovucalucalateLinearIndex
-
-    //inicjilazizaija PRVO!! jednog reda kanala/sloja for (const auto out_y : c10::irange(out_H)) {
     for (size_t out_y =0; out_y<out_H; out_y++){
-      float* p_out_red = p_out_kanal + out_y * out_strides[2];
+      float* p_out_row = p_out_channel + out_y * out_strides[2];
       
         for (size_t out_x = 0; out_x<out_W; out_x++){
-          p_out_red[out_x] = 0;
+          p_out_row[out_x] = 0;
         }
       
-      // sad ad prodjem kroz kernel for (const auto in_c : c10::irange(in_c_start, in_c_start + in_C_per_group)) {
       for(size_t in_c = in_c_start; in_c< in_c_start + in_C_per_group; in_c++){
-        
-        //for (const auto w_y : c10::irange(w_H)) {
+
         for(size_t w_y=0; w_y < w_H; w_y++){
           
-          //ssize_t in_y = stride_y * out_y + dilation_y * w_y - padding_y;
           ssize_t in_y = stride_y * (ssize_t)out_y + dilation_y * (ssize_t)w_y - padding_y;
           if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
 
-            //pointeri na ulazni red slike i na red kernela, isto logika sa calculateLinearIndex
-            const float* p_in_red = (float*)in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
+            const float* p_in_row = (float*)in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
+            const float* p_w_row = (float*)w_ptr + out_c * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
 
-            const float* p_w_red = (float*)w_ptr + out_c * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
-
-            //prilazim jednom pikselu for (const auto w_x : c10::irange(w_W)) {
             for (size_t w_x = 0; w_x < w_W; w_x++){
 
-              float kerVred = p_w_red[w_x]; //jedna vrednost kernela
-
-              //ne smem if (in_x >= 0 && in_x < static_cast<ssize_t>(in_W)) { jer vise ne radim sa jednim pikselom nego sa vl elemenata
-              //ssize_t in_x = stride_x * out_x + dilation_x * w_x - padding_x;
+              float kernelValue = p_w_row[w_x];
               ssize_t in_x0 = dilation_x * w_x - padding_x;
 
               size_t out_x_start = 0;
               if(in_x0 < 0){
-                //out_x_start = (size_t)(-in_x0/stride_x);
                 out_x_start = (size_t)((-in_x0 + stride_x - 1) / stride_x);
               }
               
@@ -199,45 +143,26 @@ void conv2d_impl(
                   out_x_end = (size_t)last;
               }
 
-              //ovo su opseg kolona po kojima mogu da idem od out_x_start do out_x_end
               if(out_x_start < out_x_end){
-                size_t out_x= out_x_start;
-                size_t preostalo= out_x_end - out_x_start;
+                size_t out_x = out_x_start;
+                size_t left = out_x_end - out_x_start;
 
-                while(preostalo > 0){
-                  //size_t vl = __riscv_vsetvl_e32m1(preostalo);
-                  size_t vl = vsetvl_e32m4(preostalo);
-
-                  //ssize_t in_x = stride_x * out_x + dilation_x * w_x - padding_x;
+                while(left > 0){
+                  size_t vl = vsetvl_e32m4(left);
                   ssize_t in_x = stride_x * (ssize_t)out_x + in_x0;
-
-                  const float* p_ulaz = p_in_red + in_x;
-                  //vfloat32m1_t v_ulaz = __riscv_vle32_v_f32m1(p_ulaz, vl);
-                  //vfloat32m1_t v_ulaz = vle32_v_f32m1(p_ulaz, vl);
-                  vfloat32m4_t v_ulaz = vlse32_v_f32m4(p_ulaz, stride_x * sizeof(float), vl);
-
-                  //da pokupim accum iz memorije
-                  //vfloat32m1_t v_acc = __riscv_vle32_v_f32m1(&p_out_red[out_x], vl);
-                  vfloat32m4_t v_acc = vle32_v_f32m4(&p_out_red[out_x], vl);
-
-                  //v_acc = __riscv_vmacc_vx_i32m1(v_acc, kerVred, v_ulaz, vl);
-                  //v_acc = __riscv_vfmacc_vf_f32m1(v_acc, kerVred, v_ulaz, vl);
-                  v_acc = vfmacc_vf_f32m4(v_acc, kerVred, v_ulaz, vl);
-
-                  //__riscv_vse32_v_i32m1(&out[i * kolona + j], v_acc, vl); //ubaciti rezulatamntni vector u izlaz
-                  //__riscv_vse32_v_f32m1(&p_out_red[out_x], v_acc, vl);
-                  vse32_v_f32m4(&p_out_red[out_x], v_acc, vl);
-
+                  const float* p_start = p_in_row + in_x;
+                  
+                  vfloat32m4_t v_start = vlse32_v_f32m4(p_start, stride_x * sizeof(float), vl);
+                  vfloat32m4_t v_acc = vle32_v_f32m4(&p_out_row[out_x], vl);
+                  v_acc = vfmacc_vf_f32m4(v_acc, kernelValue, v_start, vl);
+                  vse32_v_f32m4(&p_out_row[out_x], v_acc, vl);
 
                   out_x += vl;
-                  preostalo -= vl;
+                  left -= vl;
                   
-
                 }
 
               }
-
-
 
             }
             
@@ -247,35 +172,21 @@ void conv2d_impl(
 
       }
 
-      ////////
-      /*
-      if (bias_ptr != nullptr) {
-          accum += load_bias(&bias_ptr[out_c * bias.value().element_size()]);
-        }
-      */
       if (bias_val != 0.0f) {
         size_t out_x= 0;
-        size_t preostalo= out_W;
-        while (preostalo > 0) {
-          /*
-          size_t vl = __riscv_vsetvl_e32m1(preostalo);
-          vfloat32m1_t v_out = __riscv_vle32_v_f32m1(&p_out_red[out_x], vl);
-          v_out = __riscv_vfadd_vf_f32m1(v_out, bias_val, vl);
-          __riscv_vse32_v_f32m1(&p_out_red[out_x], v_out, vl);
-          */
-          size_t vl = vsetvl_e32m4(preostalo);
-          vfloat32m4_t v_out = vle32_v_f32m4(&p_out_red[out_x], vl);
+        size_t left= out_W;
+        while (left > 0) {
+          size_t vl = vsetvl_e32m4(left);
+          vfloat32m4_t v_out = vle32_v_f32m4(&p_out_row[out_x], vl);
           v_out = vfadd_vf_f32m4(v_out, bias_val, vl);
-          vse32_v_f32m4(&p_out_red[out_x], v_out, vl);
+          vse32_v_f32m4(&p_out_row[out_x], v_out, vl);
           out_x += vl;
-          preostalo -= vl;
+          left -= vl;
         }
       }
-
     }  
     
-  } else { // transposed convolution
-	//printf("Transposed.\n");
+  } else {
     w_coord[1] = out_c - out_c_start;
 
     for (const auto in_y : c10::irange(in_H)) {
@@ -493,18 +404,7 @@ Tensor& convolutionRVV_out(
     int64_t groups,
     Tensor& out) {
   (void)ctx;
-	//ET_LOG(Info, "Called: convolutionRVV.out");
-	/*
-	// This will print the integer enum value (e.g., 6 for Float, 5 for Half)
-	printf("Input Dtype: %d, Output Dtype: %d\n", 
-	       (int)in.scalar_type(), 
-	       (int)out.scalar_type());
-
-	// If you want to check specifically for Float
-	if (in.scalar_type() == ScalarType::Float) {
-	    printf("Processing Float32 tensors.\n");
-	}
-	*/
+  
   ET_KERNEL_CHECK(
       ctx,
       check_convolution_args(
