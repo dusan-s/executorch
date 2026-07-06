@@ -151,42 +151,34 @@ inline float rvv_bf16_dot_f32(
 
     int64_t n = len;
     
-    while (n >= (int64_t)(2 * vlmax)) {
+    while (n >= (int64_t)vlmax) {
         size_t vl = vlmax;
-        
-        vuint16m1_t va16_1 = __riscv_vle16_v_u16m1(pa, vl);
-        vuint16m1_t va16_2 = __riscv_vle16_v_u16m1(pa + vl, vl);
-        vuint16m1_t vb16_1 = __riscv_vle16_v_u16m1(pb, vl);
-        vuint16m1_t vb16_2 = __riscv_vle16_v_u16m1(pb + vl, vl);
-
-        vuint32m2_t va32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_1, vl), 16, vl);
-        vfloat32m2_t vaf_1 = __riscv_vreinterpret_v_u32m2_f32m2(va32_1);
-        vuint32m2_t vb32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_1, vl), 16, vl);
-        vfloat32m2_t vbf_1 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_1);
-
-        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf_1, vbf_1, vl);
-
-        vuint32m2_t va32_2 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_2, vl), 16, vl);
-        vfloat32m2_t vaf_2 = __riscv_vreinterpret_v_u32m2_f32m2(va32_2);
-        vuint32m2_t vb32_2 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_2, vl), 16, vl);
-        vfloat32m2_t vbf_2 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_2);
-
-        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf_2, vbf_2, vl);
-
-        pa += 2 * vl;
-        pb += 2 * vl;
-        n -= (int64_t)(2 * vl);
-    }
-    
-    while (n > 0) {
-        size_t vl = __riscv_vsetvl_e32m2((size_t)n);
-    
-        vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
-        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
-
+     	
+     	//BFloat16 to float32, for better precision
+     	vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
         vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
         vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
 
+        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
+        vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
+        vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+
+        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
+
+        pa += vl;
+        pb += vl;
+        n -= (int64_t)vl;
+       
+    }
+    
+    while (n > 0) {
+        size_t vl = __riscv_vsetvl_e16m1((size_t)n);
+	
+        vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
+        vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
+        vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+
+        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
         vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
         vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
 
@@ -197,6 +189,7 @@ inline float rvv_bf16_dot_f32(
         n -= (int64_t)vl;
     }
     
+    //vector vacc to one float number
     size_t vl_red = __riscv_vsetvl_e32m2((size_t)(len < (int64_t)vlmax ? len : (int64_t)vlmax));
     vfloat32m1_t vsum = __riscv_vfredusum_vs_f32m2_f32m1(vacc, vzero, vl_red);
     return __riscv_vfmv_f_s_f32m1_f32(vsum);
@@ -403,26 +396,37 @@ void gemm_transa_(
     opmath_t beta,
     scalar_t *c, int64_t ldc) {
   // c = alpha * (a.T @ b) + beta * c
- //---1st and the best optimized version---
+  
+//---1st and the best optimized version---
+#ifdef __riscv_vector
+     if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
+        // scalar_t=BFloat16, opmath_t=float
+	    executorch::extension::parallel_for(0, m, 1, [&](int64_t begin, int64_t end) {
+	    const auto *a_ = a + begin * lda;
+	    for (int i = begin; i < end; ++i) {
+	      const auto *b_ = b;
+	      for (int j = 0; j < n; ++j) {
+		const auto dot = rvv_detail::rvv_bf16_dot_f32(a_, b_, k);
+		b_ += ldb;
+		if (beta == 0) {
+		  c[j*ldc+i] = alpha*dot;
+		} else {
+		  c[j*ldc+i] = beta*c[j*ldc+i]+alpha*dot;
+		}
+	      }
+	      a_ += lda;
+	    }
+	  });
+     }
+
+#else
   const scalar_t *a_ = a;
   for (size_t i = 0; i < m; ++i) {
     const scalar_t *b_ = b;
     for (size_t j = 0; j < n; ++j) {
-      opmath_t dot;
-#ifdef __riscv_vector
-      if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
-        // scalar_t=BFloat16, opmath_t=float
-        dot = static_cast<opmath_t>(rvv_detail::rvv_bf16_dot_f32(a_, b_, k));
-      } else {
-        dot = sum(k, [&](int64_t l) -> opmath_t {
-          return static_cast<opmath_t>(a_[l]) * static_cast<opmath_t>(b_[l]);
-        });
-      }
-#else
-      dot = sum(k, [&](int64_t l) -> opmath_t {
+      const auto dot = sum(k, [&](int64_t l) -> opmath_t {
         return static_cast<opmath_t>(a_[l]) * static_cast<opmath_t>(b_[l]);
       });
-#endif
       b_ += ldb;
       if (beta == opmath_t(0)) {
         c[j*ldc+i] = alpha*dot;
@@ -433,6 +437,7 @@ void gemm_transa_(
     a_ += lda;
   }
 
+#endif
 /* ---2nd optimization version using pointers to eliminate the need for rvv intrinsics strided load---
 #ifdef __riscv_vector
       if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
