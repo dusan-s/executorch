@@ -14,8 +14,9 @@
 #include <executorch/runtime/core/exec_aten/util/dim_order_util.h>
 #include <executorch/runtime/kernel/kernel_includes.h>
 
+/*
 #include <riscv_vector.h>
-
+*/
 namespace torch {
 namespace executor {
 namespace native {
@@ -103,6 +104,7 @@ void conv2d_impl(
   const int64_t dilation_x = val_at(dilation, 1);
 
   if (!transposed) {
+  /*
     float bias_val = 0.0f;
     if (bias_ptr != nullptr){
       bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
@@ -185,7 +187,7 @@ void conv2d_impl(
         }
       }
     }  
-    
+   */ 
   } else {
     w_coord[1] = out_c - out_c_start;
 
