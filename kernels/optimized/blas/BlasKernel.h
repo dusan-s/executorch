@@ -269,6 +269,120 @@ inline void rvv_bf16_dot_f32_tile(
     vfloat32m1_t vsum3 = __riscv_vfredusum_vs_f32m2_f32m1(vacc3, vzero, vl_red);
     out_dots[3] = __riscv_vfmv_f_s_f32m1_f32(vsum3);
 }
+
+inline void rvv_bf16_gemv_2a_1b(
+    const torch::executor::BFloat16* pa0,
+    const torch::executor::BFloat16* pa1,
+    const torch::executor::BFloat16* b_col,
+    int64_t k,
+    float* out_dots)
+{
+    const uint16_t* p_a0 = reinterpret_cast<const uint16_t*>(pa0);
+    const uint16_t* p_a1 = reinterpret_cast<const uint16_t*>(pa1);
+    const uint16_t* pb   = reinterpret_cast<const uint16_t*>(b_col);
+ 
+    size_t vlmax = __riscv_vsetvlmax_e32m2();
+ 
+    vfloat32m2_t vacc0 = __riscv_vfmv_v_f_f32m2(0.0f, vlmax);
+    vfloat32m2_t vacc1 = __riscv_vfmv_v_f_f32m2(0.0f, vlmax);
+ 
+    vfloat32m1_t vzero = __riscv_vfmv_s_f_f32m1(0.0f, 1);
+ 
+    int64_t n = k;
+    while (n > 0) {
+        size_t vl = __riscv_vsetvl_e16m1((size_t)n);
+ 
+        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
+        vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
+        vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+ 
+ 	asm volatile("" : : : "memory");
+ 	
+        vuint16m1_t va16_0 = __riscv_vle16_v_u16m1(p_a0, vl);
+        vuint32m2_t va32_0 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_0, vl), 16, vl);
+        vfloat32m2_t vaf_0 = __riscv_vreinterpret_v_u32m2_f32m2(va32_0);
+        vacc0 = __riscv_vfmacc_vv_f32m2(vacc0, vaf_0, vbf, vl);
+        p_a0 += vl;
+        
+        asm volatile("" : : : "memory");
+ 
+        vuint16m1_t va16_1 = __riscv_vle16_v_u16m1(p_a1, vl);
+        vuint32m2_t va32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_1, vl), 16, vl);
+        vfloat32m2_t vaf_1 = __riscv_vreinterpret_v_u32m2_f32m2(va32_1);
+        vacc1 = __riscv_vfmacc_vv_f32m2(vacc1, vaf_1, vbf, vl);
+        p_a1 += vl;
+ 
+        pb += vl;
+        n -= (int64_t)vl;
+    }
+ 
+    size_t vl_red = __riscv_vsetvl_e32m2((size_t)(k < (int64_t)vlmax ? k : (int64_t)vlmax));
+ 
+    vfloat32m1_t vsum0 = __riscv_vfredusum_vs_f32m2_f32m1(vacc0, vzero, vl_red);
+    out_dots[0] = __riscv_vfmv_f_s_f32m1_f32(vsum0);
+ 
+    vfloat32m1_t vsum1 = __riscv_vfredusum_vs_f32m2_f32m1(vacc1, vzero, vl_red);
+    out_dots[1] = __riscv_vfmv_f_s_f32m1_f32(vsum1);
+
+}
+
+inline void rvv_bf16_dot_f32_tile_2b(
+    const torch::executor::BFloat16* a_col,
+    const torch::executor::BFloat16* pb0,
+    const torch::executor::BFloat16* pb1,
+    int64_t k,
+    float* out_dots)
+{
+    const uint16_t* pa   = reinterpret_cast<const uint16_t*>(a_col);
+    const uint16_t* p_b0 = reinterpret_cast<const uint16_t*>(pb0);
+    const uint16_t* p_b1 = reinterpret_cast<const uint16_t*>(pb1);
+ 
+    size_t vlmax = __riscv_vsetvlmax_e32m2();
+ 
+    vfloat32m2_t vacc0 = __riscv_vfmv_v_f_f32m2(0.0f, vlmax);
+    vfloat32m2_t vacc1 = __riscv_vfmv_v_f_f32m2(0.0f, vlmax);
+ 
+    vfloat32m1_t vzero = __riscv_vfmv_s_f_f32m1(0.0f, 1);
+ 
+    int64_t n = k;
+    while (n > 0) {
+        size_t vl = __riscv_vsetvl_e16m1((size_t)n);
+ 
+        vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
+        vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
+        vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+        
+        asm volatile("" : : : "memory");
+ 
+        vuint16m1_t vb16_0 = __riscv_vle16_v_u16m1(p_b0, vl);
+        vuint32m2_t vb32_0 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_0, vl), 16, vl);
+        vfloat32m2_t vbf_0 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_0);
+        vacc0 = __riscv_vfmacc_vv_f32m2(vacc0, vaf, vbf_0, vl);
+        p_b0 += vl;
+        
+        asm volatile("" : : : "memory");
+ 
+        vuint16m1_t vb16_1 = __riscv_vle16_v_u16m1(p_b1, vl);
+        vuint32m2_t vb32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_1, vl), 16, vl);
+        vfloat32m2_t vbf_1 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_1);
+        vacc1 = __riscv_vfmacc_vv_f32m2(vacc1, vaf, vbf_1, vl);
+        p_b1 += vl;
+ 
+ 
+        pa += vl;
+        n -= (int64_t)vl;
+    }
+ 
+    size_t vl_red = __riscv_vsetvl_e32m2((size_t)(k < (int64_t)vlmax ? k : (int64_t)vlmax));
+ 
+    vfloat32m1_t vsum0 = __riscv_vfredusum_vs_f32m2_f32m1(vacc0, vzero, vl_red);
+    out_dots[0] = __riscv_vfmv_f_s_f32m1_f32(vsum0);
+ 
+    vfloat32m1_t vsum1 = __riscv_vfredusum_vs_f32m2_f32m1(vacc1, vzero, vl_red);
+    out_dots[1] = __riscv_vfmv_f_s_f32m1_f32(vsum1);
+
+}
+
 } // namespace rvv_detail
 #endif // __riscv_vector
 
@@ -312,7 +426,7 @@ void gemm_transa_(
     a_ += lda;
   }
 */
-
+/* ---2nd optimization version using pointers to eliminate the need for rvv intrinsics strided load---
 #ifdef __riscv_vector
       if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
 	    using BF16 = torch::executor::BFloat16;
@@ -381,7 +495,152 @@ void gemm_transa_(
     }
     a_ += lda;
   }
+*/
 
+// ---3rd optimization version that calculates multiple A cols while using one B col---
+#ifdef __riscv_vector
+    if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
+        using BF16 = torch::executor::BFloat16;
+
+        // Ultra-optimization for N = 1 ( Matrix-Vector)
+        if (n == 1) {
+            int64_t i = 0;
+            const BF16* b_col = b; // just one B col exists
+ 
+            for (; i + 2 <= m; i += 2) {
+                const BF16* pa0 = a + (i + 0) * lda;
+                const BF16* pa1 = a + (i + 1) * lda;
+ 
+                float dots[2];
+                rvv_detail::rvv_bf16_gemv_2a_1b(pa0, pa1, b_col, k, dots);
+ 
+                for (int t = 0; t < 2; ++t) {
+                    int64_t c_idx = i + t; // j is 0
+                    if (beta == opmath_t(0)) {
+                        c[c_idx] = static_cast<scalar_t>(static_cast<float>(alpha) * dots[t]);
+                    } else {
+                        c[c_idx] = static_cast<scalar_t>(
+                            static_cast<float>(beta) * static_cast<float>(c[c_idx]) +
+                            static_cast<float>(alpha) * dots[t]);
+                    }
+                }
+            }
+            // tail for m
+            for (; i < m; ++i) {
+                const BF16* a_ = a + i * lda;
+                float dot = rvv_detail::rvv_bf16_dot_f32(a_, b_col, k);
+                if (beta == opmath_t(0)) {
+                    c[i] = static_cast<scalar_t>(static_cast<float>(alpha) * dot);
+                } else {
+                    c[i] = static_cast<scalar_t>(static_cast<float>(beta) * static_cast<float>(c[i]) + static_cast<float>(alpha) * dot);
+                }
+            }
+            return;
+        }
+ 
+        // 4A for 1B Tiling (for little N, n <= 8)
+        if (n <= 8) {
+            int64_t i = 0;
+            for (; i + 2 <= m; i += 2) {
+                const BF16* pa0 = a + (i + 0) * lda;
+                const BF16* pa1 = a + (i + 1) * lda;
+
+ 
+                for (int64_t j = 0; j < n; ++j) {
+                    const BF16* b_col = b + j * ldb;
+                    float dots[2];
+                    rvv_detail::rvv_bf16_gemv_2a_1b(pa0, pa1, b_col, k, dots);
+ 
+                    for (int t = 0; t < 2; ++t) {
+                        int64_t c_idx = j * ldc + (i + t);
+                        if (beta == opmath_t(0)) {
+                            c[c_idx] = static_cast<scalar_t>(static_cast<float>(alpha) * dots[t]);
+                        } else {
+                            c[c_idx] = static_cast<scalar_t>(
+                                static_cast<float>(beta) * static_cast<float>(c[c_idx]) +
+                                static_cast<float>(alpha) * dots[t]);
+                        }
+                    }
+                }
+            }
+            // tail for m
+            for (; i < m; ++i) {
+                const BF16* a_ = a + i * lda;
+                for (int64_t j = 0; j < n; ++j) {
+                    const BF16* b_col = b + j * ldb;
+                    float dot = rvv_detail::rvv_bf16_dot_f32(a_, b_col, k);
+                    int64_t c_idx = j * ldc + i;
+                    if (beta == opmath_t(0)) {
+                        c[c_idx] = static_cast<scalar_t>(static_cast<float>(alpha) * dot);
+                    } else {
+                        c[c_idx] = static_cast<scalar_t>(static_cast<float>(beta) * static_cast<float>(c[c_idx]) + static_cast<float>(alpha) * dot);
+                    }
+                }
+            }
+            return;
+        }
+ 
+        // 1A for 4B Tiling (for big N, n > 8)
+        else {
+            const BF16* a_ = a;
+            for (size_t i = 0; i < m; ++i) {
+                int64_t j = 0;
+                for (; j + 2 <= n; j += 2) {
+                    const BF16* pb0 = b + (j + 0) * ldb;
+                    const BF16* pb1 = b + (j + 1) * ldb;
+ 
+                    float dots[2];
+                    rvv_detail::rvv_bf16_dot_f32_tile_2b(a_, pb0, pb1, k, dots);
+ 
+                    for (int t = 0; t < 2; ++t) {
+                        int64_t jj = j + t;
+                        int64_t c_idx = jj * ldc + i;
+                        if (beta == opmath_t(0)) {
+                            c[c_idx] = static_cast<scalar_t>(static_cast<float>(alpha) * dots[t]);
+                        } else {
+                            c[c_idx] = static_cast<scalar_t>(
+                                static_cast<float>(beta) * static_cast<float>(c[c_idx]) +
+                                static_cast<float>(alpha) * dots[t]);
+                        }
+                    }
+                }
+                // tail for n
+                for (; j < n; ++j) {
+                    const BF16* b_col = b + j * ldb;
+                    float dot = rvv_detail::rvv_bf16_dot_f32(a_, b_col, k);
+                    int64_t c_idx = j * ldc + i;
+                    if (beta == opmath_t(0)) {
+                        c[c_idx] = static_cast<scalar_t>(static_cast<float>(alpha) * dot);
+                    } else {
+                        c[c_idx] = static_cast<scalar_t>(
+                            static_cast<float>(beta) * static_cast<float>(c[c_idx]) +
+                            static_cast<float>(alpha) * dot);
+                    }
+                }
+                a_ += lda;
+            }
+            return;
+        }
+    }
+#endif
+ 
+    // fallback
+    const scalar_t *a_ = a;
+    for (size_t i = 0; i < m; ++i) {
+        const scalar_t *b_ = b;
+        for (size_t j = 0; j < n; ++j) {
+            const auto dot = sum(k, [&](int64_t l) -> opmath_t {
+                return static_cast<opmath_t>(a_[l]) * static_cast<opmath_t>(b_[l]);
+            });
+            b_ += ldb;
+            if (beta == opmath_t(0)) {
+                c[j*ldc+i] = alpha*dot;
+            } else {
+                c[j*ldc+i] = beta*c[j*ldc+i]+alpha*dot;
+            }
+        }
+        a_ += lda;
+    }
 
 }
 
