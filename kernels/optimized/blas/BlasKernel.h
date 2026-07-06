@@ -151,46 +151,52 @@ inline float rvv_bf16_dot_f32(
 
     int64_t n = len;
     
-    while (n >= (int64_t)vlmax) {
-    size_t vl = vlmax;
-     
-    vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
-    vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
+    while (n >= (int64_t)(2 * vlmax)) {
+        size_t vl = vlmax;
+        
+        vuint16m1_t va16_1 = __riscv_vle16_v_u16m1(pa, vl);
+        vuint16m1_t va16_2 = __riscv_vle16_v_u16m1(pa + vl, vl);
+        vuint16m1_t vb16_1 = __riscv_vle16_v_u16m1(pb, vl);
+        vuint16m1_t vb16_2 = __riscv_vle16_v_u16m1(pb + vl, vl);
 
-    vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
-    vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+        vuint32m2_t va32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_1, vl), 16, vl);
+        vfloat32m2_t vaf_1 = __riscv_vreinterpret_v_u32m2_f32m2(va32_1);
+        vuint32m2_t vb32_1 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_1, vl), 16, vl);
+        vfloat32m2_t vbf_1 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_1);
 
-    pa += vl;
-    pb += vl;
-    n -= (int64_t)vl;
+        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf_1, vbf_1, vl);
 
-    vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
-    vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+        vuint32m2_t va32_2 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16_2, vl), 16, vl);
+        vfloat32m2_t vaf_2 = __riscv_vreinterpret_v_u32m2_f32m2(va32_2);
+        vuint32m2_t vb32_2 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16_2, vl), 16, vl);
+        vfloat32m2_t vbf_2 = __riscv_vreinterpret_v_u32m2_f32m2(vb32_2);
 
-    vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
-       
+        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf_2, vbf_2, vl);
+
+        pa += 2 * vl;
+        pb += 2 * vl;
+        n -= (int64_t)(2 * vl);
     }
     
     while (n > 0) {
-        size_t vl = __riscv_vsetvl_e16m1((size_t)n);
-	
-	    vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
-	    vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
+        size_t vl = __riscv_vsetvl_e32m2((size_t)n);
+    
+        vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
+        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
 
-	    vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
-	    vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+        vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
+        vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
 
-	    pa += vl;
-	    pb += vl;
-	    n -= (int64_t)vl;
+        vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
+        vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
 
-	    vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
-	    vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
 
-	    vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
+        pa += vl;
+        pb += vl;
+        n -= (int64_t)vl;
     }
     
-    //vector vacc to one float number
     size_t vl_red = __riscv_vsetvl_e32m2((size_t)(len < (int64_t)vlmax ? len : (int64_t)vlmax));
     vfloat32m1_t vsum = __riscv_vfredusum_vs_f32m2_f32m1(vacc, vzero, vl_red);
     return __riscv_vfmv_f_s_f32m1_f32(vsum);
