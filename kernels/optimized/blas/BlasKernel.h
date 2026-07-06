@@ -152,41 +152,42 @@ inline float rvv_bf16_dot_f32(
     int64_t n = len;
     
     while (n >= (int64_t)vlmax) {
-        size_t vl = vlmax;
-     	
-     	//BFloat16 to float32, for better precision
-     	vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
-        vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
-        vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+    size_t vl = vlmax;
+     
+    vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
+    vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
 
-        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
-        vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
-        vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+    vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
+    vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
 
-        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
+    pa += vl;
+    pb += vl;
+    n -= (int64_t)vl;
 
-        pa += vl;
-        pb += vl;
-        n -= (int64_t)vl;
+    vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
+    vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+
+    vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
        
     }
     
     while (n > 0) {
         size_t vl = __riscv_vsetvl_e16m1((size_t)n);
 	
-        vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
-        vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
-        vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
+	    vuint16m1_t va16 = __riscv_vle16_v_u16m1(pa, vl);
+	    vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
 
-        vuint16m1_t vb16 = __riscv_vle16_v_u16m1(pb, vl);
-        vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
-        vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+	    vuint32m2_t va32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(va16, vl), 16, vl);
+	    vfloat32m2_t vaf = __riscv_vreinterpret_v_u32m2_f32m2(va32);
 
-        vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
+	    pa += vl;
+	    pb += vl;
+	    n -= (int64_t)vl;
 
-        pa += vl;
-        pb += vl;
-        n -= (int64_t)vl;
+	    vuint32m2_t vb32 = __riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(vb16, vl), 16, vl);
+	    vfloat32m2_t vbf = __riscv_vreinterpret_v_u32m2_f32m2(vb32);
+
+	    vacc = __riscv_vfmacc_vv_f32m2(vacc, vaf, vbf, vl);
     }
     
     //vector vacc to one float number
@@ -396,7 +397,7 @@ void gemm_transa_(
     opmath_t beta,
     scalar_t *c, int64_t ldc) {
   // c = alpha * (a.T @ b) + beta * c
-/* ---1st and the best optimized version---
+ //---1st and the best optimized version---
   const scalar_t *a_ = a;
   for (size_t i = 0; i < m; ++i) {
     const scalar_t *b_ = b;
@@ -425,7 +426,7 @@ void gemm_transa_(
     }
     a_ += lda;
   }
-*/
+
 /* ---2nd optimization version using pointers to eliminate the need for rvv intrinsics strided load---
 #ifdef __riscv_vector
       if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
@@ -497,6 +498,7 @@ void gemm_transa_(
   }
 */
 
+/*
 // ---3rd optimization version that calculates multiple A cols while using one B col---
 #ifdef __riscv_vector
     if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
@@ -641,6 +643,7 @@ void gemm_transa_(
         }
         a_ += lda;
     }
+*/
 
 }
 
