@@ -91,7 +91,8 @@ executorch_target_link_options_shared_lib(executorch)
 # llama_runner library
 add_subdirectory(runner)
 
-set(link_libraries executorch gflags)
+#set(link_libraries executorch gflags) #comment this for LlamaRunner
+set(link_libraries executorch gflags etdump flatccrt)
 set(_srcs main.cpp)
 
 if(TARGET optimized_native_cpu_ops_lib)

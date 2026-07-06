@@ -57,6 +57,10 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)")
   list(APPEND _custom_ops__srcs
        "extension/llm/custom_ops/spinquant/third-party/FFHT/fht_avx.c"
   )
+  
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+  message(STATUS "RISC-V detected: skipping SpinQuant FFHT sources (not implemented for this arch)")
+  
 else()
   message(
     FATAL_ERROR

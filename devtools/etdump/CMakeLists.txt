@@ -63,7 +63,8 @@ target_include_directories(
 install(
   TARGETS etdump flatccrt
   EXPORT ExecuTorchTargets
-  DESTINATION ${CMAKE_BINARY_DIR}/lib
+  #DESTINATION ${CMAKE_BINARY_DIR}/lib #commenting this for llamaRunner
+  DESTINATION lib
   INCLUDES
   DESTINATION ${_common_include_directories}
 )
