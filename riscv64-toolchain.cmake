@@ -1,12 +1,13 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR riscv64)
 
-#set(CMAKE_C_COMPILER riscv64-linux-gnu-gcc-15)
-#set(CMAKE_CXX_COMPILER riscv64-linux-gnu-g++-15)
-#set(CMAKE_AR riscv64-linux-gnu-ar)
-#set(CMAKE_RANLIB riscv64-linux-gnu-ranlib)
+if(NOT DEFINED ENV{BP_TC_PATH})
+    message(FATAL_ERROR "BP_TC_PATH environment variable is not set.\n")
+endif()
 
-set(TC /home/ivam/praksa/toolchainBananaPi/riscv64-glibc-ubuntu-24.04-gcc/riscv/bin/riscv64-unknown-linux-gnu-)
+set(BP_TC $ENV{BP_TC_PATH})
+
+set(TC ${BP_TC}/riscv64-glibc-ubuntu-24.04-gcc/riscv/bin/riscv64-unknown-linux-gnu-)
 
 set(CMAKE_C_COMPILER   ${TC}gcc)
 set(CMAKE_CXX_COMPILER ${TC}g++)
