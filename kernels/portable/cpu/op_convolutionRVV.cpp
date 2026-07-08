@@ -14,9 +14,10 @@
 #include <executorch/runtime/core/exec_aten/util/dim_order_util.h>
 #include <executorch/runtime/kernel/kernel_includes.h>
 
-/*
+#ifdef __riscv_vector
 #include <riscv_vector.h>
-*/
+#endif
+
 namespace torch {
 namespace executor {
 namespace native {
@@ -104,7 +105,93 @@ void conv2d_impl(
   const int64_t dilation_x = val_at(dilation, 1);
 
   if (!transposed) {
-  /*
+#ifdef __riscv_vector
+    float bias_val = 0.0f;
+    if (bias_ptr != nullptr){
+      bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
+    }
+    float* p_out_channel = (float*)out_ptr + batch * out_strides[0] + out_c * out_strides[1];
+
+    for (size_t out_y =0; out_y<out_H; out_y++){
+      float* p_out_row = p_out_channel + out_y * out_strides[2];
+      
+        for (size_t out_x = 0; out_x<out_W; out_x++){
+          p_out_row[out_x] = 0;
+        }
+      
+      for(size_t in_c = in_c_start; in_c< in_c_start + in_C_per_group; in_c++){
+
+        for(size_t w_y=0; w_y < w_H; w_y++){
+          
+          ssize_t in_y = stride_y * (ssize_t)out_y + dilation_y * (ssize_t)w_y - padding_y;
+          if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
+
+            const float* p_in_row = (float*)in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
+            const float* p_w_row = (float*)w_ptr + out_c * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
+
+            for (size_t w_x = 0; w_x < w_W; w_x++){
+
+              float kernelValue = p_w_row[w_x];
+              ssize_t in_x0 = dilation_x * w_x - padding_x;
+
+              size_t out_x_start = 0;
+              if(in_x0 < 0){
+                out_x_start = (size_t)((-in_x0 + stride_x - 1) / stride_x);
+              }
+              
+              size_t out_x_end = out_W;
+              {
+                ssize_t last = ((ssize_t)in_W - 1 - in_x0) / stride_x + 1;
+                if (last < (ssize_t)out_W)
+                  out_x_end = (size_t)last;
+              }
+
+              if(out_x_start < out_x_end){
+                size_t out_x = out_x_start;
+                size_t left = out_x_end - out_x_start;
+
+                while(left > 0){
+                  size_t vl = __riscv_vsetvl_e32m4(left);
+                  ssize_t in_x = stride_x * (ssize_t)out_x + in_x0;
+                  const float* p_start = p_in_row + in_x;
+                  
+                  vfloat32m4_t v_start = __riscv_vlse32_v_f32m4(p_start, stride_x * sizeof(float), vl);
+                  vfloat32m4_t v_acc = __riscv_vle32_v_f32m4(&p_out_row[out_x], vl);
+                  v_acc = __riscv_vfmacc_vf_f32m4(v_acc, kernelValue, v_start, vl);
+                  __riscv_vse32_v_f32m4(&p_out_row[out_x], v_acc, vl);
+
+                  out_x += vl;
+                  left -= vl;
+                  
+                }
+
+              }
+
+            }
+            
+          }
+
+        }
+
+      }
+
+      if (bias_val != 0.0f) {
+        size_t out_x= 0;
+        size_t left= out_W;
+        while (left > 0) {
+          size_t vl = __riscv_vsetvl_e32m4(left);
+          vfloat32m4_t v_out = __riscv_vle32_v_f32m4(&p_out_row[out_x], vl);
+          v_out = __riscv_vfadd_vf_f32m4(v_out, bias_val, vl);
+          __riscv_vse32_v_f32m4(&p_out_row[out_x], v_out, vl);
+          out_x += vl;
+          left -= vl;
+        }
+      }
+    }  
+
+#endif
+/* For CanMV-K230 without __riscv_
+
     float bias_val = 0.0f;
     if (bias_ptr != nullptr){
       bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
@@ -186,8 +273,9 @@ void conv2d_impl(
           left -= vl;
         }
       }
-    }  
-   */ 
+    }
+
+*/
   } else {
     w_coord[1] = out_c - out_c_start;
 
