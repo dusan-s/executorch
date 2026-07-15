@@ -396,26 +396,37 @@ void gemm_transa_(
     opmath_t beta,
     scalar_t *c, int64_t ldc) {
   // c = alpha * (a.T @ b) + beta * c
-/* ---1st and the best optimized version---
+  
+//---1st and the best optimized version---
+#ifdef __riscv_vector
+     if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
+        // scalar_t=BFloat16, opmath_t=float
+	    executorch::extension::parallel_for(0, m, 1, [&](int64_t begin, int64_t end) {
+	    const auto *a_ = a + begin * lda;
+	    for (int i = begin; i < end; ++i) {
+	      const auto *b_ = b;
+	      for (int j = 0; j < n; ++j) {
+		const auto dot = rvv_detail::rvv_bf16_dot_f32(a_, b_, k);
+		b_ += ldb;
+		if (beta == 0) {
+		  c[j*ldc+i] = alpha*dot;
+		} else {
+		  c[j*ldc+i] = beta*c[j*ldc+i]+alpha*dot;
+		}
+	      }
+	      a_ += lda;
+	    }
+	  });
+     }
+
+#else
   const scalar_t *a_ = a;
   for (size_t i = 0; i < m; ++i) {
     const scalar_t *b_ = b;
     for (size_t j = 0; j < n; ++j) {
-      opmath_t dot;
-#ifdef __riscv_vector
-      if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
-        // scalar_t=BFloat16, opmath_t=float
-        dot = static_cast<opmath_t>(rvv_detail::rvv_bf16_dot_f32(a_, b_, k));
-      } else {
-        dot = sum(k, [&](int64_t l) -> opmath_t {
-          return static_cast<opmath_t>(a_[l]) * static_cast<opmath_t>(b_[l]);
-        });
-      }
-#else
-      dot = sum(k, [&](int64_t l) -> opmath_t {
+      const auto dot = sum(k, [&](int64_t l) -> opmath_t {
         return static_cast<opmath_t>(a_[l]) * static_cast<opmath_t>(b_[l]);
       });
-#endif
       b_ += ldb;
       if (beta == opmath_t(0)) {
         c[j*ldc+i] = alpha*dot;
@@ -425,7 +436,8 @@ void gemm_transa_(
     }
     a_ += lda;
   }
-*/
+
+#endif
 /* ---2nd optimization version using pointers to eliminate the need for rvv intrinsics strided load---
 #ifdef __riscv_vector
       if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
@@ -497,6 +509,7 @@ void gemm_transa_(
   }
 */
 
+/*
 // ---3rd optimization version that calculates multiple A cols while using one B col---
 #ifdef __riscv_vector
     if constexpr (std::is_same_v<scalar_t, torch::executor::BFloat16>) {
@@ -641,6 +654,7 @@ void gemm_transa_(
         }
         a_ += lda;
     }
+*/
 
 }
 
