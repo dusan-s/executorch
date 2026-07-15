@@ -1,0 +1,4 @@
+- op: convolution.out
+  kernels:
+    - arg_meta: null
+      kernel_name: torch::executor::convolutionRVV_out
