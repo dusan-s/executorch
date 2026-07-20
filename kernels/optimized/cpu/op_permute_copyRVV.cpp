@@ -43,8 +43,8 @@ void increment_coordinate_permuted(
   }
 }
  
-// preskace poslednju/najbrzu izlaznu dimenziju
-// tu dimenziju vektorizovana unutrasnja petlja drzi na 0 i sama je obradjuje u celom redu odjednom
+// skips last/fastest out dimension
+// the vectorized inner loop keeps that dimension at 0 and processes it in the entire row at once
 void increment_coordinate_permuted_outer(
     const Tensor& tensor,
     size_t* const coordinate,
@@ -106,7 +106,7 @@ template <size_t N>
 constexpr bool kHasRvvPath =
     (N == 1) || (N == 2) || (N == 4) || (N == 8);
  
-// strided gather (stride_elems elemenata) pa kontinualni store
+// strided gather (stride_elems elements) then continual store
 template <typename UIntT>
 void gather_row_rvv(
     const UIntT* const in_base,
@@ -119,8 +119,8 @@ void gather_row_rvv(
   UIntT* dst = out_row;
   size_t n = length;
  
-  // stride == 1 - red je kontinualan
-  // (permutacija ostavlja poslednju dimenziju netaknutu na tom mestu)
+  // stride == 1 - row  is continuous
+  // (the permutation leaves the last dimension intact at that location)
   if (stride_elems == 1) {
     while (n > 0) {
       size_t vl;
@@ -194,7 +194,7 @@ bool is_simple_last_two_dims_swap(
     return false;
   }
   
-  //ako se samo poslednje dve dimenzije zamenjuju, sve ostale ose moraju da ostanu iste
+  // if only the last two dimensions are swapped, all other axes must remain the same
   for (int64_t i = 0; i < n - 2; i++) {
     int64_t d = dims[i] >= 0 ? dims[i] : dims[i] + n;
     
@@ -207,7 +207,7 @@ bool is_simple_last_two_dims_swap(
   int64_t d_second_last = dims[n - 2] >= 0 ? dims[n - 2] : dims[n - 2] + n;
   int64_t d_last = dims[n - 1] >= 0 ? dims[n - 1] : dims[n - 1] + n;
   
-  //pretposlednja mora da bude jednaka poslednjoj, i poslednja==pretposlednja
+  // the second last must be equal to last, and last must be equal to second last
   if (d_second_last != n - 1 || d_last != n - 2) {
     return false;    
   }
@@ -218,8 +218,8 @@ bool is_simple_last_two_dims_swap(
   return true;
 }
 
-// in_base: R x C, row-major (element (r,c) na r*C + c)
-// out_base: C x R, row-major (element (c,r) na c*R + r)
+// in_base: R x C, row-major (element (r,c) on r*C + c)
+// out_base: C x R, row-major (element (c,r) on c*R + r)
 template <typename UIntT>
 void transpose_block_rvv(
     const UIntT* const in_base,
@@ -227,17 +227,17 @@ void transpose_block_rvv(
     size_t R,
     size_t C) {
     
-  constexpr size_t kTileRows = PERMUTE_RVV_TILE_ROWS; // visina bloka koji obradjujem
+  constexpr size_t kTileRows = PERMUTE_RVV_TILE_ROWS; // the height of the block that is being processed
 
   for (size_t bi = 0; bi < R; bi += kTileRows) {
-    const size_t i_end = std::min(bi + kTileRows, R); // kraj trenutnog bloka
-    const size_t block_len = i_end - bi; // visina trenutnog bloka (obicno visine PERMUTE_RVV_TILE_ROWS)
+    const size_t i_end = std::min(bi + kTileRows, R); // end of current block
+    const size_t block_len = i_end - bi; // current block height (usually PERMUTE_RVV_TILE_ROWS height)
 
     for (size_t j = 0; j < C; j++) {
       gather_row_rvv<UIntT>(
-          in_base + bi * C + j, // prvi element bloka u koloni j
-          out_base + j * R + bi, // odgovarajuce mesto u izlaznom redu j
-          C, // stride izmedju uzastopnih redova unutar bloka
+          in_base + bi * C + j, // first element of the block in column j
+          out_base + j * R + bi, // appropriate place in the output queue j
+          C, // strides between consecutive rows within a block
           block_len);
     }
   }
@@ -263,11 +263,11 @@ void permute_copy_row_loop(
       return;
     }
 
-    // swap poslednje dve ose
+    // swap of the last two axes
     size_t R = 0, C = 0;
     if (is_simple_last_two_dims_swap(in, dims, &R, &C)) {
-      const size_t batch_elems = R * C; // br el. u jednoj matrici
-      const size_t num_batches = (R * C == 0) ? 0 : in.numel() / batch_elems; // broj matrica
+      const size_t batch_elems = R * C; // number of elements in one matrix
+      const size_t num_batches = (R * C == 0) ? 0 : in.numel() / batch_elems; // number of matrices
       
       for (size_t b = 0; b < num_batches; b++) {
         transpose_block_rvv<UIntT>(reinterpret_cast<const UIntT*>(in_data) + b * batch_elems, reinterpret_cast<UIntT*>(out_data) + b * batch_elems, R, C);
@@ -308,7 +308,7 @@ void permute_copy_row_loop(
     }
     */
   } else {
-    // tipovi bez direktne RVV putanje imaju skalarni fallback
+    // types without a direct RVV path have a scalar fallback
     for (const auto i : c10::irange(out.numel())) {
       out_data[i] =
           in_data[executorch::runtime::coordinateToIndexWithTrailingDimsMemo(in, in_coord, trailing_dims_memo)];
@@ -322,7 +322,7 @@ void permute_copy_row_loop(
  
 } // namespace
  
-Tensor& permute_copyRVV_out(
+Tensor& opt_permute_copyRVV_out(
     KernelRuntimeContext& ctx,
     const Tensor& in,
     IntArrayRef dims,
@@ -349,7 +349,7 @@ Tensor& permute_copyRVV_out(
  
   size_t in_coord[kTensorDimensionLimit] = {0};
   size_t trailing_dims_memo[kTensorDimensionLimit];
-  executorch::runtime::memoizeTrailingDims(in, trailing_dims_memo); //racuna koliko treba da skoci linearni indeks kada se koordinata neke dimenzije poveca za 1
+  executorch::runtime::memoizeTrailingDims(in, trailing_dims_memo); // calculates how much the linear index should jump when the coordinate of a dimension increases by 1
  
   // in and out must be the same dtype
   ET_SWITCH_ALL_TYPES(in_type, ctx, "permute_copy.out", CTYPE, [&] {
@@ -361,7 +361,7 @@ Tensor& permute_copyRVV_out(
         in, out, dims, in_coord, trailing_dims_memo, in_data, out_data);
 #else
     // fallback
-    //coordinateToIndexWithTrailingDimsMemo pretvara visedimenzionalnu koordinatu tenzora u jedan linearni indeks memorije koristeci stride vrednosti iz trailing_dims_memo
+    // coordinateToIndexWithTrailingDimsMemo converts a multidimensional coordinate of a tensor into a linear memory index using stride values ​​from trailing_dims_memo
     for (const auto i : c10::irange(out.numel())) {
       out_data[i] =
           in_data[executorch::runtime::coordinateToIndexWithTrailingDimsMemo(in, in_coord, trailing_dims_memo)];
