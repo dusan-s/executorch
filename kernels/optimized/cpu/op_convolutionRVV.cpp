@@ -481,7 +481,7 @@ void convolution_wrapper(
 
 } // namespace
 
-Tensor& convolutionRVV_out(
+Tensor& opt_convolutionRVV_out(
     KernelRuntimeContext& ctx,
     const Tensor& in,
     const Tensor& weight,

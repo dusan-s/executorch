@@ -64,6 +64,10 @@ generate_bindings_for_kernels(
 message("Generated files ${gen_command_sources}")
 
 list(TRANSFORM _optimized_kernels__srcs PREPEND "${EXECUTORCH_ROOT}/")
+list(APPEND _optimized_kernels__srcs
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpu/op_convolutionRVV.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpu/op_permute_copyRVV.cpp"
+)
 add_library(optimized_kernels ${_optimized_kernels__srcs})
 
 target_include_directories(
