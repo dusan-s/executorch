@@ -40,17 +40,7 @@ namespace {
  * in_C_per_group x in_H x in_W, to compute an out channel of size 1 x out_H x
  * out_W.
  */
- 
- /**
- * Computes 2D convolution out results for a given group and channel.
- * The forward (non-transposed) path is vectorized using RVV intrinsics, 
- * for each kernel position (in_c, w_y, w_x), a safe output column range
- * is computed so that the corresponding input column stays within bounds,
- * then that range is processed in chunks using strided load (vlse32),
- * fused multiply-accumulate (vfmacc), and store (vse32). Bias is added
- * in a final vectorized pass over output row. The transposed
- * convolution path remains scalar, unchanged from the original.
- */
+
 template <typename CTYPE, typename LoadFn = CTYPE (*)(const void*)>
 void conv2d_impl(
     const CTYPE* const in_ptr,
@@ -105,177 +95,58 @@ void conv2d_impl(
   const int64_t dilation_x = val_at(dilation, 1);
 
   if (!transposed) {
-#ifdef __riscv_vector
-    float bias_val = 0.0f;
-    if (bias_ptr != nullptr){
-      bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
-    }
-    float* p_out_channel = (float*)out_ptr + batch * out_strides[0] + out_c * out_strides[1];
+    w_coord[0] = out_c;
+    // Compute 2D output region
+    for (const auto out_y : c10::irange(out_H)) {
+      out_coord[2] = out_y;
+      for (const auto out_x : c10::irange(out_W)) {
+        out_coord[3] = out_x;
 
-    for (size_t out_y =0; out_y<out_H; out_y++){
-      float* p_out_row = p_out_channel + out_y * out_strides[2];
-      
-        for (size_t out_x = 0; out_x<out_W; out_x++){
-          p_out_row[out_x] = 0;
-        }
-      
-      for(size_t in_c = in_c_start; in_c< in_c_start + in_C_per_group; in_c++){
+        CTYPE accum = 0.0f;
+        for (const auto in_c :
+             c10::irange(in_c_start, in_c_start + in_C_per_group)) {
+          in_coord[1] = in_c;
+          w_coord[1] = in_c - in_c_start;
 
-        for(size_t w_y=0; w_y < w_H; w_y++){
-          
-          ssize_t in_y = stride_y * (ssize_t)out_y + dilation_y * (ssize_t)w_y - padding_y;
-          if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
+          for (const auto w_y : c10::irange(w_H)) {
+            w_coord[2] = w_y;
 
-            const float* p_in_row = (float*)in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
-            const float* p_w_row = (float*)w_ptr + out_c * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
+            ssize_t in_y = stride_y * out_y + dilation_y * w_y - padding_y;
+            in_coord[2] = in_y;
+            // Only proceed if input y coordinate is within bounds
+            if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
+              for (const auto w_x : c10::irange(w_W)) {
+                w_coord[3] = w_x;
 
-            for (size_t w_x = 0; w_x < w_W; w_x++){
+                ssize_t in_x = stride_x * out_x + dilation_x * w_x - padding_x;
+                in_coord[3] = in_x;
 
-              float kernelValue = p_w_row[w_x];
-              ssize_t in_x0 = dilation_x * w_x - padding_x;
+                // Only proceed if input x coordinate is within bounds
+                if (in_x >= 0 && in_x < static_cast<ssize_t>(in_W)) {
+                  size_t in_idx =
+                      calculate_linear_index(in_coord, in_strides.data(), 4);
+                  CTYPE in_val = in_ptr[in_idx];
 
-              size_t out_x_start = 0;
-              if(in_x0 < 0){
-                out_x_start = (size_t)((-in_x0 + stride_x - 1) / stride_x);
-              }
-              
-              size_t out_x_end = out_W;
-              {
-                ssize_t last = ((ssize_t)in_W - 1 - in_x0) / stride_x + 1;
-                if (last < (ssize_t)out_W)
-                  out_x_end = (size_t)last;
-              }
+                  size_t w_idx =
+                      calculate_linear_index(w_coord, w_strides.data(), 4);
+                  CTYPE w_val = w_ptr[w_idx];
 
-              if(out_x_start < out_x_end){
-                size_t out_x = out_x_start;
-                size_t left = out_x_end - out_x_start;
-
-                while(left > 0){
-                  size_t vl = __riscv_vsetvl_e32m4(left);
-                  ssize_t in_x = stride_x * (ssize_t)out_x + in_x0;
-                  const float* p_start = p_in_row + in_x;
-                  
-                  vfloat32m4_t v_start = __riscv_vlse32_v_f32m4(p_start, stride_x * sizeof(float), vl);
-                  vfloat32m4_t v_acc = __riscv_vle32_v_f32m4(&p_out_row[out_x], vl);
-                  v_acc = __riscv_vfmacc_vf_f32m4(v_acc, kernelValue, v_start, vl);
-                  __riscv_vse32_v_f32m4(&p_out_row[out_x], v_acc, vl);
-
-                  out_x += vl;
-                  left -= vl;
-                  
+                  accum += in_val * w_val;
                 }
-
               }
-
             }
-            
           }
-
         }
 
-      }
-
-      if (bias_val != 0.0f) {
-        size_t out_x= 0;
-        size_t left= out_W;
-        while (left > 0) {
-          size_t vl = __riscv_vsetvl_e32m4(left);
-          vfloat32m4_t v_out = __riscv_vle32_v_f32m4(&p_out_row[out_x], vl);
-          v_out = __riscv_vfadd_vf_f32m4(v_out, bias_val, vl);
-          __riscv_vse32_v_f32m4(&p_out_row[out_x], v_out, vl);
-          out_x += vl;
-          left -= vl;
+        if (bias_ptr != nullptr) {
+          accum += load_bias(&bias_ptr[out_c * bias.value().element_size()]);
         }
-      }
-    }  
-
-#endif
-/* For CanMV-K230 without __riscv_
-
-    float bias_val = 0.0f;
-    if (bias_ptr != nullptr){
-      bias_val = (float)load_bias(&bias_ptr[out_c * bias.value().element_size()]);
-    }
-    float* p_out_channel = (float*)out_ptr + batch * out_strides[0] + out_c * out_strides[1];
-
-    for (size_t out_y =0; out_y<out_H; out_y++){
-      float* p_out_row = p_out_channel + out_y * out_strides[2];
-      
-        for (size_t out_x = 0; out_x<out_W; out_x++){
-          p_out_row[out_x] = 0;
-        }
-      
-      for(size_t in_c = in_c_start; in_c< in_c_start + in_C_per_group; in_c++){
-
-        for(size_t w_y=0; w_y < w_H; w_y++){
-          
-          ssize_t in_y = stride_y * (ssize_t)out_y + dilation_y * (ssize_t)w_y - padding_y;
-          if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
-
-            const float* p_in_row = (float*)in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
-            const float* p_w_row = (float*)w_ptr + out_c * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
-
-            for (size_t w_x = 0; w_x < w_W; w_x++){
-
-              float kernelValue = p_w_row[w_x];
-              ssize_t in_x0 = dilation_x * w_x - padding_x;
-
-              size_t out_x_start = 0;
-              if(in_x0 < 0){
-                out_x_start = (size_t)((-in_x0 + stride_x - 1) / stride_x);
-              }
-              
-              size_t out_x_end = out_W;
-              {
-                ssize_t last = ((ssize_t)in_W - 1 - in_x0) / stride_x + 1;
-                if (last < (ssize_t)out_W)
-                  out_x_end = (size_t)last;
-              }
-
-              if(out_x_start < out_x_end){
-                size_t out_x = out_x_start;
-                size_t left = out_x_end - out_x_start;
-
-                while(left > 0){
-                  size_t vl = vsetvl_e32m4(left);
-                  ssize_t in_x = stride_x * (ssize_t)out_x + in_x0;
-                  const float* p_start = p_in_row + in_x;
-                  
-                  vfloat32m4_t v_start = vlse32_v_f32m4(p_start, stride_x * sizeof(float), vl);
-                  vfloat32m4_t v_acc = vle32_v_f32m4(&p_out_row[out_x], vl);
-                  v_acc = vfmacc_vf_f32m4(v_acc, kernelValue, v_start, vl);
-                  vse32_v_f32m4(&p_out_row[out_x], v_acc, vl);
-
-                  out_x += vl;
-                  left -= vl;
-                  
-                }
-
-              }
-
-            }
-            
-          }
-
-        }
-
-      }
-
-      if (bias_val != 0.0f) {
-        size_t out_x= 0;
-        size_t left= out_W;
-        while (left > 0) {
-          size_t vl = vsetvl_e32m4(left);
-          vfloat32m4_t v_out = vle32_v_f32m4(&p_out_row[out_x], vl);
-          v_out = vfadd_vf_f32m4(v_out, bias_val, vl);
-          vse32_v_f32m4(&p_out_row[out_x], v_out, vl);
-          out_x += vl;
-          left -= vl;
-        }
+        size_t out_idx =
+            calculate_linear_index(out_coord, out_strides.data(), 4);
+        out_ptr[out_idx] = accum;
       }
     }
 
-*/
   } else {
     w_coord[1] = out_c - out_c_start;
 
@@ -325,6 +196,471 @@ void conv2d_impl(
     }
   }
 }
+
+#ifdef __riscv_vector
+
+constexpr size_t kOutChannelBlock = 12;
+
+// one loaded input vector is shared among all channels in the block, instead of re-reading the input for each channel
+void conv2d_forward_channel_block_rvv(
+    const float* const in_ptr,
+    StridesArrayRef in_strides,
+    const float* const w_ptr,
+    StridesArrayRef w_strides,
+    const char* const bias_ptr,
+    size_t bias_elem_size,
+    IntArrayRef stride,
+    IntArrayRef padding,
+    IntArrayRef dilation,
+    float* const out_ptr,
+    StridesArrayRef out_strides,
+    const size_t batch,
+    const size_t in_c_start,
+    const size_t in_C_per_group,
+    const size_t in_H,
+    const size_t in_W,
+    const size_t w_H,
+    const size_t w_W,
+    const size_t out_c_block_start,
+    const size_t block_size,
+    const size_t out_H,
+    const size_t out_W) {
+    
+  const int64_t stride_y = val_at(stride, 0);
+  const int64_t padding_y = val_at(padding, 0, /*default_value=*/0);
+  const int64_t dilation_y = val_at(dilation, 0);
+  const int64_t stride_x = val_at(stride, 1);
+  const int64_t padding_x = val_at(padding, 1, /*default_value=*/0);
+  const int64_t dilation_x = val_at(dilation, 1);
+
+  float bias_vals[kOutChannelBlock] = {0.0f};
+  if (bias_ptr != nullptr) {
+    for (size_t k = 0; k < block_size; k++) {
+      bias_vals[k] = *reinterpret_cast<const float*>(bias_ptr + (out_c_block_start + k) * bias_elem_size);
+      
+    }
+  }
+
+  float* p_out_channel[kOutChannelBlock];
+  for (size_t k = 0; k < block_size; k++) {
+    p_out_channel[k] = out_ptr + batch * out_strides[0] + (out_c_block_start + k) * out_strides[1];
+    
+  }
+
+  for (size_t out_y = 0; out_y < out_H; out_y++) {
+    float* p_out_row[kOutChannelBlock];
+    
+    for (size_t k = 0; k < block_size; k++) {
+      p_out_row[k] = p_out_channel[k] + out_y * out_strides[2];
+      
+      for (size_t out_x = 0; out_x < out_W; out_x++) {
+        p_out_row[k][out_x] = 0;
+        
+      }
+    }
+
+    for (size_t in_c = in_c_start; in_c < in_c_start + in_C_per_group; in_c++) {
+
+      for (size_t w_y = 0; w_y < w_H; w_y++) {
+        ssize_t in_y = stride_y * (ssize_t)out_y + dilation_y * (ssize_t)w_y - padding_y;
+        
+        if (in_y >= 0 && in_y < static_cast<ssize_t>(in_H)) {
+          
+          const float* p_in_row = in_ptr + batch * in_strides[0] + in_c * in_strides[1] + in_y * in_strides[2];
+
+          const float* p_w_row[kOutChannelBlock];
+          for (size_t k = 0; k < block_size; k++) {
+            p_w_row[k] = w_ptr + (out_c_block_start + k) * w_strides[0] + (in_c - in_c_start) * w_strides[1] + w_y * w_strides[2];
+          
+          }
+
+          for (size_t w_x = 0; w_x < w_W; w_x++) {
+            float kernel_vals[kOutChannelBlock];
+          
+            for (size_t k = 0; k < block_size; k++) {
+              kernel_vals[k] = p_w_row[k][w_x];
+            
+            }
+
+            ssize_t in_x0 = dilation_x * (ssize_t)w_x - padding_x;
+
+            size_t out_x_start = 0;
+            if (in_x0 < 0) {
+              out_x_start = (size_t)((-in_x0 + stride_x - 1) / stride_x);
+            }
+            size_t out_x_end = out_W;
+            {
+              ssize_t last = ((ssize_t)in_W - 1 - in_x0) / stride_x + 1;
+              if (last < (ssize_t)out_W) out_x_end = (size_t)last;
+            }
+            
+            if(out_x_start < out_x_end){
+              size_t out_x = out_x_start;
+              size_t left = out_x_end - out_x_start;
+              while (left > 0) {
+                size_t vl = __riscv_vsetvl_e32m2(left);
+                ssize_t in_x = stride_x * (ssize_t)out_x + in_x0;
+                const float* p_start = p_in_row + in_x;
+
+                // one loading input, shared between all channels in the block
+                vfloat32m2_t v_in = __riscv_vlse32_v_f32m2(p_start, stride_x * sizeof(float), vl);
+		
+		if (block_size == 12) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+
+		  vfloat32m2_t v_acc7 = __riscv_vle32_v_f32m2(&p_out_row[7][out_x], vl);
+		  v_acc7 = __riscv_vfmacc_vf_f32m2(v_acc7, kernel_vals[7], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[7][out_x], v_acc7, vl);
+		  
+		  vfloat32m2_t v_acc8 = __riscv_vle32_v_f32m2(&p_out_row[8][out_x], vl);
+		  v_acc8 = __riscv_vfmacc_vf_f32m2(v_acc8, kernel_vals[8], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[8][out_x], v_acc8, vl);
+		  
+		  vfloat32m2_t v_acc9 = __riscv_vle32_v_f32m2(&p_out_row[9][out_x], vl);
+		  v_acc9 = __riscv_vfmacc_vf_f32m2(v_acc9, kernel_vals[9], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[9][out_x], v_acc9, vl);
+		  
+		  vfloat32m2_t v_acc10 = __riscv_vle32_v_f32m2(&p_out_row[10][out_x], vl);
+		  v_acc10 = __riscv_vfmacc_vf_f32m2(v_acc10, kernel_vals[10], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[10][out_x], v_acc10, vl);
+		  
+		  vfloat32m2_t v_acc11 = __riscv_vle32_v_f32m2(&p_out_row[11][out_x], vl);
+		  v_acc11 = __riscv_vfmacc_vf_f32m2(v_acc11, kernel_vals[11], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[11][out_x], v_acc11, vl);	
+		  	  
+		} else if (block_size == 11) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+
+		  vfloat32m2_t v_acc7 = __riscv_vle32_v_f32m2(&p_out_row[7][out_x], vl);
+		  v_acc7 = __riscv_vfmacc_vf_f32m2(v_acc7, kernel_vals[7], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[7][out_x], v_acc7, vl);
+		  
+		  vfloat32m2_t v_acc8 = __riscv_vle32_v_f32m2(&p_out_row[8][out_x], vl);
+		  v_acc8 = __riscv_vfmacc_vf_f32m2(v_acc8, kernel_vals[8], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[8][out_x], v_acc8, vl);
+		  
+		  vfloat32m2_t v_acc9 = __riscv_vle32_v_f32m2(&p_out_row[9][out_x], vl);
+		  v_acc9 = __riscv_vfmacc_vf_f32m2(v_acc9, kernel_vals[9], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[9][out_x], v_acc9, vl);
+		  
+		  vfloat32m2_t v_acc10 = __riscv_vle32_v_f32m2(&p_out_row[10][out_x], vl);
+		  v_acc10 = __riscv_vfmacc_vf_f32m2(v_acc10, kernel_vals[10], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[10][out_x], v_acc10, vl);
+		  
+		} else if (block_size == 10) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+
+		  vfloat32m2_t v_acc7 = __riscv_vle32_v_f32m2(&p_out_row[7][out_x], vl);
+		  v_acc7 = __riscv_vfmacc_vf_f32m2(v_acc7, kernel_vals[7], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[7][out_x], v_acc7, vl);
+		  
+		  vfloat32m2_t v_acc8 = __riscv_vle32_v_f32m2(&p_out_row[8][out_x], vl);
+		  v_acc8 = __riscv_vfmacc_vf_f32m2(v_acc8, kernel_vals[8], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[8][out_x], v_acc8, vl);
+		  
+		  vfloat32m2_t v_acc9 = __riscv_vle32_v_f32m2(&p_out_row[9][out_x], vl);
+		  v_acc9 = __riscv_vfmacc_vf_f32m2(v_acc9, kernel_vals[9], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[9][out_x], v_acc9, vl);	
+		  	  
+		} else if (block_size == 9) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+
+		  vfloat32m2_t v_acc7 = __riscv_vle32_v_f32m2(&p_out_row[7][out_x], vl);
+		  v_acc7 = __riscv_vfmacc_vf_f32m2(v_acc7, kernel_vals[7], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[7][out_x], v_acc7, vl);
+		  
+		  vfloat32m2_t v_acc8 = __riscv_vle32_v_f32m2(&p_out_row[8][out_x], vl);
+		  v_acc8 = __riscv_vfmacc_vf_f32m2(v_acc8, kernel_vals[8], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[8][out_x], v_acc8, vl);
+		  
+		} else if (block_size == 8) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+
+		  vfloat32m2_t v_acc7 = __riscv_vle32_v_f32m2(&p_out_row[7][out_x], vl);
+		  v_acc7 = __riscv_vfmacc_vf_f32m2(v_acc7, kernel_vals[7], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[7][out_x], v_acc7, vl);
+		  
+		} else if (block_size == 7) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+
+		  vfloat32m2_t v_acc6 = __riscv_vle32_v_f32m2(&p_out_row[6][out_x], vl);
+		  v_acc6 = __riscv_vfmacc_vf_f32m2(v_acc6, kernel_vals[6], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[6][out_x], v_acc6, vl);
+		  
+		} else if (block_size == 6) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+		  
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+
+		  vfloat32m2_t v_acc5 = __riscv_vle32_v_f32m2(&p_out_row[5][out_x], vl);
+		  v_acc5 = __riscv_vfmacc_vf_f32m2(v_acc5, kernel_vals[5], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[5][out_x], v_acc5, vl);
+		  
+		} else if (block_size == 5) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+		  
+		  vfloat32m2_t v_acc4 = __riscv_vle32_v_f32m2(&p_out_row[4][out_x], vl);
+		  v_acc4 = __riscv_vfmacc_vf_f32m2(v_acc4, kernel_vals[4], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[4][out_x], v_acc4, vl);
+		  
+		} else if (block_size == 4) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+
+		  vfloat32m2_t v_acc3 = __riscv_vle32_v_f32m2(&p_out_row[3][out_x], vl);
+		  v_acc3 = __riscv_vfmacc_vf_f32m2(v_acc3, kernel_vals[3], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[3][out_x], v_acc3, vl);
+		  
+		} else if (block_size == 3) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		  vfloat32m2_t v_acc2 = __riscv_vle32_v_f32m2(&p_out_row[2][out_x], vl);
+		  v_acc2 = __riscv_vfmacc_vf_f32m2(v_acc2, kernel_vals[2], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[2][out_x], v_acc2, vl);
+		  
+		} else if (block_size == 2) {
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+
+		  vfloat32m2_t v_acc1 = __riscv_vle32_v_f32m2(&p_out_row[1][out_x], vl);
+		  v_acc1 = __riscv_vfmacc_vf_f32m2(v_acc1, kernel_vals[1], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[1][out_x], v_acc1, vl);
+		  
+		} else {
+		  // block_size must be 1 here
+		  vfloat32m2_t v_acc0 = __riscv_vle32_v_f32m2(&p_out_row[0][out_x], vl);
+		  v_acc0 = __riscv_vfmacc_vf_f32m2(v_acc0, kernel_vals[0], v_in, vl);
+		  __riscv_vse32_v_f32m2(&p_out_row[0][out_x], v_acc0, vl);
+		  
+		}
+
+                out_x += vl;
+                left -= vl;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (size_t k = 0; k < block_size; k++) {
+      if (bias_vals[k] != 0.0f) {
+        size_t out_x = 0;
+        size_t left = out_W;
+        
+        while (left > 0) {
+          size_t vl = __riscv_vsetvl_e32m2(left);
+          vfloat32m2_t v_out = __riscv_vle32_v_f32m2(&p_out_row[k][out_x], vl);
+          v_out = __riscv_vfadd_vf_f32m2(v_out, bias_vals[k], vl);
+          __riscv_vse32_v_f32m2(&p_out_row[k][out_x], v_out, vl);
+          
+          out_x += vl;
+          left -= vl;
+        }
+      }
+    }
+  }
+}
+
+#endif // __riscv_vector
 
 template <typename CTYPE, typename LoadFn = CTYPE (*)(const void*)>
 void convolution_wrapper(
@@ -429,6 +765,16 @@ void convolution_wrapper(
   size_t out_N = out.size(0);
   size_t out_C = out.size(1);
   size_t out_C_per_group = out_C / groups;
+  
+  size_t in_C = in_sizes[1];
+  size_t in_C_per_group = in_C / groups;
+
+  size_t in_H = in_sizes[2];
+  size_t in_W = in_sizes[3];
+  size_t w_H = weight_sizes[2];
+  size_t w_W = weight_sizes[3];
+  size_t out_H = out_sizes[2];
+  size_t out_W = out_sizes[3];
 
   if (transposed) {
     // For transposed convolution, we need to initialized the output before we
@@ -450,33 +796,121 @@ void convolution_wrapper(
     for (const auto group : c10::irange(groups)) {
       // Align channel offset based on the group
       size_t out_c_start = group * out_C_per_group;
-      // Populate all the out channels in the group
-      for (const auto out_c :
-           c10::irange(out_c_start, out_c_start + out_C_per_group)) {
-        conv2d_impl(
-            in_ptr,
-            in_sizes,
-            {in_strides, 4},
-            w_ptr,
-            weight_sizes,
-            {weight_strides, 4},
-            bias,
-            bias_ptr,
-            load_bias,
-            stride_,
-            padding_,
-            dilation_,
-            groups,
-            out_ptr,
-            out_sizes,
-            {out_strides, 4},
-            batch,
-            group,
-            out_c,
-            transposed);
+      size_t in_c_start = group * in_C_per_group;
+
+      if (transposed) {
+        for (const auto out_c :
+             c10::irange(out_c_start, out_c_start + out_C_per_group)) {
+          conv2d_impl(
+              in_ptr,
+              in_sizes,
+              {in_strides, 4},
+              w_ptr,
+              weight_sizes,
+              {weight_strides, 4},
+              bias,
+              bias_ptr,
+              load_bias,
+              stride_,
+              padding_,
+              dilation_,
+              groups,
+              out_ptr,
+              out_sizes,
+              {out_strides, 4},
+              batch,
+              group,
+              out_c,
+              transposed);
+        }
+      } else {
+#ifdef __riscv_vector
+        if constexpr (std::is_same_v<CTYPE, float>) {
+          size_t out_c = out_c_start;
+          while (out_c < out_c_start + out_C_per_group) {
+            size_t block_size = std::min(kOutChannelBlock, out_c_start + out_C_per_group - out_c);
+            conv2d_forward_channel_block_rvv(
+                reinterpret_cast<const float*>(in_ptr),
+                {in_strides, 4},
+                reinterpret_cast<const float*>(w_ptr),
+                {weight_strides, 4},
+                bias_ptr,
+                bias.has_value() ? bias.value().element_size() : 0,
+                stride_,
+                padding_,
+                dilation_,
+                reinterpret_cast<float*>(out_ptr),
+                {out_strides, 4},
+                batch,
+                in_c_start,
+                in_C_per_group,
+                in_H,
+                in_W,
+                w_H,
+                w_W,
+                out_c,
+                block_size,
+                out_H,
+                out_W);
+            out_c += block_size;
+          }
+        } else {
+          for (const auto out_c :
+               c10::irange(out_c_start, out_c_start + out_C_per_group)) {
+            conv2d_impl(
+                in_ptr,
+                in_sizes,
+                {in_strides, 4},
+                w_ptr,
+                weight_sizes,
+                {weight_strides, 4},
+                bias,
+                bias_ptr,
+                load_bias,
+                stride_,
+                padding_,
+                dilation_,
+                groups,
+                out_ptr,
+                out_sizes,
+                {out_strides, 4},
+                batch,
+                group,
+                out_c,
+                transposed);
+          }
+        }
+#else
+        // fallback
+        for (const auto out_c :
+             c10::irange(out_c_start, out_c_start + out_C_per_group)) {
+          conv2d_impl(
+              in_ptr,
+              in_sizes,
+              {in_strides, 4},
+              w_ptr,
+              weight_sizes,
+              {weight_strides, 4},
+              bias,
+              bias_ptr,
+              load_bias,
+              stride_,
+              padding_,
+              dilation_,
+              groups,
+              out_ptr,
+              out_sizes,
+              {out_strides, 4},
+              batch,
+              group,
+              out_c,
+              transposed);
+        }
+#endif
       }
     }
   }
+
 }
 
 } // namespace
