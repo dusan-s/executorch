@@ -1,0 +1,9 @@
+- op: convolution.out
+  kernels:
+    - arg_meta: null
+      kernel_name: torch::executor::convolutionRVV_out
+      
+- op: permute_copy.out
+  kernels:
+    - arg_meta: null
+      kernel_name: torch::executor::permute_copyRVV_out

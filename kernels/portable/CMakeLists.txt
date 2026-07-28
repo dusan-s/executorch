@@ -37,13 +37,28 @@ list(FILTER _portable_kernels__srcs EXCLUDE REGEX "test/*.cpp")
 list(FILTER _portable_kernels__srcs EXCLUDE REGEX "codegen")
 # Generate C++ bindings to register kernels into both PyTorch (for AOT) and
 # Executorch (for runtime). Here select all ops in functions.yaml
+set(_my_yaml "${CMAKE_CURRENT_SOURCE_DIR}/my_functions.yaml")
 set(_yaml "${CMAKE_CURRENT_SOURCE_DIR}/functions.yaml")
 
-gen_selected_ops(LIB_NAME "portable_ops_lib" OPS_SCHEMA_YAML "${_yaml}")
+merge_yaml(
+  FUNCTIONS_YAML ${_my_yaml}
+  FALLBACK_YAML  ${_yaml}
+  OUTPUT_DIR     ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+###gen_selected_ops(LIB_NAME "portable_ops_lib" OPS_SCHEMA_YAML "${_yaml}")
+gen_selected_ops(
+  LIB_NAME "portable_ops_lib"
+  OPS_SCHEMA_YAML "${CMAKE_CURRENT_BINARY_DIR}/merged.yaml"
+)
 
 # Expect gen_selected_ops output file to be selected_operators.yaml
+###generate_bindings_for_kernels(
+###  LIB_NAME "portable_ops_lib" FUNCTIONS_YAML "${_yaml}"
+###)
 generate_bindings_for_kernels(
-  LIB_NAME "portable_ops_lib" FUNCTIONS_YAML "${_yaml}"
+  LIB_NAME "portable_ops_lib"
+  FUNCTIONS_YAML "${CMAKE_CURRENT_BINARY_DIR}/merged.yaml"
 )
 
 message("Generated files ${gen_command_sources}")

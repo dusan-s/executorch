@@ -116,13 +116,3 @@
   kernels:
     - arg_meta: null
       kernel_name: torch::executor::opt_where_out
-      
-- op: convolution.out
-  kernels:
-    - arg_meta: null
-      kernel_name: torch::executor::opt_convolutionRVV_out
-      
-- op: permute_copy.out
-  kernels:
-    - arg_meta: null
-      kernel_name: torch::executor::opt_permute_copyRVV_out

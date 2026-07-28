@@ -11,10 +11,8 @@
 #include <executorch/runtime/kernel/kernel_includes.h>
  
 #include <type_traits>
- 
-#ifdef __riscv_vector
+
 #include <riscv_vector.h>
-#endif
 
 #define PERMUTE_RVV_TILE_ROWS 32
  
@@ -80,8 +78,7 @@ size_t increment_coordinate_permuted_outer_incremental(
   }
   return base_index;
 }
- 
-#ifdef __riscv_vector
+
  
 template <size_t N>
 struct UIntOfSize;
@@ -125,25 +122,25 @@ void gather_row_rvv(
     while (n > 0) {
       size_t vl;
       if constexpr (sizeof(UIntT) == 1) {
-        vl = __riscv_vsetvl_e8m8(n);
-        auto v = __riscv_vle8_v_u8m8(reinterpret_cast<const uint8_t*>(src), vl);
-        __riscv_vse8_v_u8m8(reinterpret_cast<uint8_t*>(dst), v, vl);
+        vl = vsetvl_e8m8(n);
+        auto v = vle8_v_u8m8(reinterpret_cast<const uint8_t*>(src), vl);
+        vse8_v_u8m8(reinterpret_cast<uint8_t*>(dst), v, vl);
         
       } else if constexpr (sizeof(UIntT) == 2) {
-        vl = __riscv_vsetvl_e16m8(n);
-        auto v = __riscv_vle16_v_u16m8(reinterpret_cast<const uint16_t*>(src), vl);
-        __riscv_vse16_v_u16m8(reinterpret_cast<uint16_t*>(dst), v, vl);
+        vl = vsetvl_e16m8(n);
+        auto v = vle16_v_u16m8(reinterpret_cast<const uint16_t*>(src), vl);
+        vse16_v_u16m8(reinterpret_cast<uint16_t*>(dst), v, vl);
         
       } else if constexpr (sizeof(UIntT) == 4) {
-        vl = __riscv_vsetvl_e32m8(n);
-        auto v = __riscv_vle32_v_u32m8(reinterpret_cast<const uint32_t*>(src), vl);
-        __riscv_vse32_v_u32m8(reinterpret_cast<uint32_t*>(dst), v, vl);
+        vl = vsetvl_e32m8(n);
+        auto v = vle32_v_u32m8(reinterpret_cast<const uint32_t*>(src), vl);
+        vse32_v_u32m8(reinterpret_cast<uint32_t*>(dst), v, vl);
         
       } else {
         static_assert(sizeof(UIntT) == 8, "unsupported element width");
-        vl = __riscv_vsetvl_e64m8(n);
-        auto v = __riscv_vle64_v_u64m8(reinterpret_cast<const uint64_t*>(src), vl);
-        __riscv_vse64_v_u64m8(reinterpret_cast<uint64_t*>(dst), v, vl);
+        vl = vsetvl_e64m8(n);
+        auto v = vle64_v_u64m8(reinterpret_cast<const uint64_t*>(src), vl);
+        vse64_v_u64m8(reinterpret_cast<uint64_t*>(dst), v, vl);
         
       }
       src += vl;
@@ -156,31 +153,32 @@ void gather_row_rvv(
   while (n > 0) {
     size_t vl;
     if constexpr (sizeof(UIntT) == 1) {
-      vl = __riscv_vsetvl_e8m8(n);
-      auto v = __riscv_vlse8_v_u8m8(reinterpret_cast<const uint8_t*>(src), stride_bytes, vl);
-      __riscv_vse8_v_u8m8(reinterpret_cast<uint8_t*>(dst), v, vl);
+      vl = vsetvl_e8m8(n);
+      auto v = vlse8_v_u8m8(reinterpret_cast<const uint8_t*>(src), stride_bytes, vl);
+      vse8_v_u8m8(reinterpret_cast<uint8_t*>(dst), v, vl);
       
     } else if constexpr (sizeof(UIntT) == 2) {
-      vl = __riscv_vsetvl_e16m8(n);
-      auto v = __riscv_vlse16_v_u16m8(reinterpret_cast<const uint16_t*>(src), stride_bytes, vl);
-      __riscv_vse16_v_u16m8(reinterpret_cast<uint16_t*>(dst), v, vl);
+      vl = vsetvl_e16m8(n);
+      auto v = vlse16_v_u16m8(reinterpret_cast<const uint16_t*>(src), stride_bytes, vl);
+      vse16_v_u16m8(reinterpret_cast<uint16_t*>(dst), v, vl);
       
     } else if constexpr (sizeof(UIntT) == 4) {
-      vl = __riscv_vsetvl_e32m8(n);
-      auto v = __riscv_vlse32_v_u32m8(reinterpret_cast<const uint32_t*>(src), stride_bytes, vl);
-      __riscv_vse32_v_u32m8(reinterpret_cast<uint32_t*>(dst), v, vl);
+      vl = vsetvl_e32m8(n);
+      auto v = vlse32_v_u32m8(reinterpret_cast<const uint32_t*>(src), stride_bytes, vl);
+      vse32_v_u32m8(reinterpret_cast<uint32_t*>(dst), v, vl);
       
     } else {
       static_assert(sizeof(UIntT) == 8, "unsupported element width");
-      vl = __riscv_vsetvl_e64m8(n);
-      auto v = __riscv_vlse64_v_u64m8(reinterpret_cast<const uint64_t*>(src), stride_bytes, vl);
-      __riscv_vse64_v_u64m8(reinterpret_cast<uint64_t*>(dst), v, vl);
+      vl = vsetvl_e64m8(n);
+      auto v = vlse64_v_u64m8(reinterpret_cast<const uint64_t*>(src), stride_bytes, vl);
+      vse64_v_u64m8(reinterpret_cast<uint64_t*>(dst), v, vl);
       
     }
     src += vl * stride_elems;
     dst += vl;
     n -= vl;
   }
+ 
 }
 
 bool is_simple_last_two_dims_swap(
@@ -318,11 +316,10 @@ void permute_copy_row_loop(
   }
 }
  
-#endif // __riscv_vector
  
 } // namespace
  
-Tensor& opt_permute_copyRVV_out(
+Tensor& permute_copyRVV_out(
     KernelRuntimeContext& ctx,
     const Tensor& in,
     IntArrayRef dims,
@@ -355,19 +352,9 @@ Tensor& opt_permute_copyRVV_out(
   ET_SWITCH_ALL_TYPES(in_type, ctx, "permute_copy.out", CTYPE, [&] {
     const CTYPE* const in_data = in.const_data_ptr<CTYPE>();
     CTYPE* const out_data = out.mutable_data_ptr<CTYPE>();
- 
-#ifdef __riscv_vector
+    
     permute_copy_row_loop<CTYPE>(
         in, out, dims, in_coord, trailing_dims_memo, in_data, out_data);
-#else
-    // fallback
-    // coordinateToIndexWithTrailingDimsMemo converts a multidimensional coordinate of a tensor into a linear memory index using stride values ​​from trailing_dims_memo
-    for (const auto i : c10::irange(out.numel())) {
-      out_data[i] =
-          in_data[executorch::runtime::coordinateToIndexWithTrailingDimsMemo(in, in_coord, trailing_dims_memo)];
-      increment_coordinate_permuted(in, in_coord, dims);
-    }
-#endif
   });
  
   return out;
